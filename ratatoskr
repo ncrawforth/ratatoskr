@@ -1,0 +1,909 @@
+#!/bin/sh
+
+# Find a Python interpreter:
+'''':
+export LC_ALL=POSIX
+for e in micropython python python3 python2; do
+  if $(which >/dev/null "$e"); then
+    if [ "$1" = "-d" ]; then
+      ((exec "$e" "$0")&) </dev/null >/dev/null 2>/dev/null &
+      exit 0
+    fi
+    exec "$e" "$0"
+  fi
+done
+echo >&2 No Python interpreter found.
+exit -1
+'''
+
+
+
+# Import dependencies:
+try:
+  ## For MicroPython, fill in some missing stdlib functions using libc6
+  import ffi, sys, uos, uselect as select, usocket as socket, ustruct
+  libc = ffi.open("libc.so.6")
+  class BlockingIOError(Exception): pass
+  def func(ret_t, name, arg_t):
+    f = libc.func(ret_t, name, arg_t)
+    def call(*args):
+      while len(args) < len(arg_t):
+        args = args + (None,)
+      r = f(*args)
+      if r == -1:
+        if uos.errno() == 11:
+          raise BlockingIOError()
+        raise OSError()
+      return r
+    return call
+  class fcntl:
+    F_SETFL = 4
+    fcntl = func("i", "fcntl", "iii")
+  class os:
+    O_NONBLOCK = 2048
+    _exit = func("v", "_exit", "i")
+    chdir = func("i", "chdir", "s")
+    close = func("i", "close", "i")
+    dup2 = func("i", "dup2", "ii")
+    execl = func("i", "execl", "PPP")
+    fork = func("i", "fork", "")
+    mkdir = func("i", "mkdir", "s")
+    pipe_ = func("i", "pipe", "p")
+    read_ = func("i", "read", "ipi")
+    remove = func("i", "remove", "s")
+    rename = func("i", "rename", "ss")
+    utime_ = func("i", "utime", "sP")
+    write_ = func("i", "write", "iPi")
+    def listdir(path):
+      for f in uos.ilistdir(path):
+        if type(f[0]) == str:
+          yield f[0].encode("utf-8")
+        else:
+          yield f[0]
+    def pipe():
+      fds = ustruct.pack("ii", 0, 0)
+      os.pipe_(fds)
+      return ustruct.unpack("ii", fds)
+    def read(fd, n):
+      buf = bytearray(n)
+      return bytes(buf[:os.read_(fd, buf, n)])
+    def stat(path):
+      return uos.stat(path)
+    def utime(path, times):
+      os.utime_(path, ustruct.pack("ll", times[0], times[1]))
+    def write(fd, buf):
+      return os.write_(fd, buf, len(buf))
+    class environ:
+      setenv_ = func("i", "setenv", "ssi")
+      def setdefault(key, value):
+        os.environ.setenv_(key, value, 0)
+    class path:
+      dirname = func("s", "dirname", "s")
+  class time:
+    gmtime_ = func("P", "gmtime", "P")
+    strftime_ = func("i", "strftime", "sisP")
+    time = func("i", "time", "P")
+    def gmtime(t):
+      return time.gmtime_(ustruct.pack("l", int(t)))
+    def strftime(format, t):
+      buf = bytearray(32)
+      return str(buf[:time.strftime_(buf, 32, format, t)], "utf-8")
+except:
+  import fcntl, os, select, socket, sys, ssl, time
+
+
+
+# Change to the executable directory so relative paths work
+os.chdir(os.path.dirname(__file__) or ".")
+
+# Load the configuration file
+f = open("config.py", "r")
+exec(f.read(), globals())
+f.close()
+
+
+
+# Useful functions:
+
+## FAT filesystems have 2-second mtime resolution, but Linux sometimes caches
+## mtimes with higher resolution, which messes with ETags.
+## Get file stats, with mtime rounded to nearest 2 second interval.
+class Stat:
+  def __init__(self, path, isdir, size, mtime):
+    self.path, self.isdir, self.size, self.mtime = path, isdir, size, mtime
+def stat(path):
+  try:
+    s = os.stat(path)
+    return Stat(path, s[0] & 16384 == 16384, s[6], s[8] // 2 * 2)
+  except:
+    return None
+
+## Decode a URL-encoded string.
+def urldecode(s):
+  parts = s.split(b"%")
+  result = bytearray(parts[0])
+  for part in parts[1:]:
+    try:
+      result.append(int(part[:2], 16))
+      result.extend(part[2:])
+    except KeyError:
+      result.append(b"%")
+      result.extend(part)
+  return bytes(result)
+
+## URL-encode a string.
+percent = {}
+for c in range(0, 256):
+  percent[c] = percent[b"%c" % c] = b"%%%02x" % c
+for c in b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-":
+  percent[ord(b"%c" % c)] = percent[c] = b"%c" % c
+def urlencode(s):
+  return b"".join([percent[c] for c in s])
+
+## DJB's hash function over reversed string, so a small change at the end of a
+## string produces a large change in the hash.
+def hash(s, hash = None):
+  if hash == None:
+    hash = 5381
+  for i in range(len(s) - 1, -1, -1):
+    c = ord(b"%c" % s[i])
+    hash = (hash * 33 + c) % 4294967296
+  return hash
+
+## Make a nice colour from a string.
+def approxcos(x):
+  return min(1, max(-1, 6 * abs(((x + 360) % 360 - 180) / 360) - 1.5))
+def colour(s):
+  h = hash(s)
+  H = h % 360                                                                 
+  S = h // 360 % 60 + 30
+  r = int(approxcos(H) * (S * 0.8) + 150)
+  g = int(approxcos(H + 240) * (S * 0.6) + 150)
+  b = int(approxcos(H + 120) * S + 150)
+  return b"#%02x%02x%02x" % (r, g, b)
+
+## Create a filename for a temporary file.
+lasttmpname = time.time()
+def tmpname():
+  global lasttmpname
+  lasttmpname = lasttmpname + 1
+  return b"%d" % hash(b"%d" % lasttmpname)
+
+## Convert and sanitise a href.
+def hreftopath(href, relativeto = b"/"):
+  if href.startswith(b"/"):
+    parts = urldecode(href).split(b"/")
+  else:
+    parts = relativeto.split(b"/")[:-1] + urldecode(href).split(b"/")
+  result = []
+  for part in parts:
+    if part == b"" or part == b".":
+      pass
+    elif part == b"..":
+      if len(result) > 0:
+        result.pop()
+    else:
+      result.append(part)
+  if href.endswith(b"/") and len(result) > 0:
+    result.append(b"")
+  return b"/" + b"/".join(result)
+
+## Format a date according to the HTTP spec.
+def rfcdate(t):
+  return time.strftime("%a, %d %b %Y %H:%M:%S GMT",
+                       time.gmtime(t)).encode("utf-8")
+
+## Touch a file in a way that tries to guarantee its ETag will change.
+touched = {}
+mtime = 0
+def touch(path):
+  global touched, mtime
+  mtime = max(time.time() // 2 * 2, mtime + 2)
+  try:
+    os.utime(path, (mtime, mtime))
+  except:
+    pass
+  touched[path] = True
+  dir, fn = path.rsplit(b"/", 1)
+  if not fn.startswith(b"."):
+    try:
+      os.utime(dir, (mtime, mtime))
+    except:
+      pass
+    touched[dir + b"/"] = True
+def istouched(path):
+  global touched
+  return path in touched
+
+
+
+# Create the listening socket
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(socket.getaddrinfo(LISTEN_ADDR, LISTEN_PORT)[0][-1])
+server.listen(100)
+
+
+
+# Receive up to <count> bytes from a socket.
+def recv(count):
+  global socketfd
+  yield WAIT_INPUT
+  result = socketfd.recv(min(count, BUF_SIZE))
+  if len(result) == 0:
+    raise SocketClosed()
+  yield result
+
+# Send all of <data> to a socket.
+def send(data):
+  global socketfd
+  while len(data) > 0:
+    yield WAIT_OUTPUT
+    try:
+      sent = socketfd.send(data)
+    except:
+      raise SocketClosed()
+    if sent == 0:
+      raise SocketClosed()
+    data = data[sent:]
+
+# Receive a HTTP request and extract the method, href, query and headers.
+class Headers:
+  def __getattr__(self, x):
+    return None
+def recvrequest():
+  buffer = yield recv(BUF_SIZE)
+  head, buffer = buffer.split(b"\r\n\r\n", 1)
+  head = head.split(b"\r\n")
+  method, href, version = head[0].split(b" ", 2)
+  try:
+    href, query = href.split(b"?", 1)
+  except:
+    query = None
+  headers = Headers()
+  for h in head[1:]:
+    try:
+      key, value = h.split(b": ", 1)
+      setattr(headers, key.upper().replace(b"-", b"_").decode("utf-8"), value)
+    except:
+      pass
+  yield method, href, query, headers, buffer
+
+# Spawn a CGI process
+def spawncgi(cgi, method, path, query, headers, buffer):
+  p1out, p1in = os.pipe()
+  p2out, p2in = os.pipe()
+  pid = os.fork()
+  if pid == 0:
+    if headers.CONTENT_LENGTH:
+      os.environ.setdefault("CONTENT_LENGTH", headers.CONTENT_LENGTH)
+    if headers.CONTENT_TYPE:
+      os.environ.setdefault("CONTENT_TYPE", headers.CONTENT_TYPE)
+    os.environ.setdefault("GATEWAY_INTERFACE", b"CGI/1.1")
+    os.environ.setdefault("PATH_INFO", path[len(cgi):])
+    if query:
+      os.environ.setdefault("QUERY_STRING", query)
+    os.environ.setdefault("REQUEST_METHOD", method)
+    os.environ.setdefault("SCRIPT_NAME", cgi)
+    if headers.HOST:
+      os.environ.setdefault("SERVER_NAME", headers.HOST)
+    os.environ.setdefault("SERVER_PORT", b"%d" % LISTEN_PORT)
+    os.environ.setdefault("SERVER_PROTOCOL", b"HTTP/1.1")
+    os.environ.setdefault("SERVER_SOFTWARE", b"Ratatoskr/0.9")
+    for k in headers.__dict__:
+      os.environ.setdefault("HTTP_" + k, headers.__dict__[k])
+    os.close(p1in)
+    os.dup2(p1out, 0)
+    os.dup2(p2in, 1)
+    os.close(p2out)
+    if os.fork() == 0:
+      os.execl(CGI_BIN[cgi], CGI_BIN[cgi])
+    os._exit(0)
+  os.close(p1out)
+  os.close(p2in)
+  fcntl.fcntl(p1in, fcntl.F_SETFL, os.O_NONBLOCK)
+  fcntl.fcntl(p2out, fcntl.F_SETFL, os.O_NONBLOCK)
+  try:
+    requestlength = int(headers.CONTENT_LENGTH or 0)
+    while requestlength > 0:
+      f.write(buffer[:requestlength])
+      requestlength -= len(buffer)
+      if requestlength > 0:
+        buffer = yield recv(requestlength)
+    os.close(p1in)
+    p1in = None
+    sentstatus = False
+    while True:
+      yield WAIT_YIELD
+      try:
+        buffer = os.read(p2out, BUF_SIZE)
+        if len(buffer) == 0:
+          break
+        if not sentstatus:
+          sentstatus = True
+          if buffer.startswith(b"HTTP/1.1"):
+            pass
+          else:
+            start = buffer.find(b"Status: ")
+            end = buffer.find(b"\r\n", start + 8)
+            if start != -1 and end != -1:
+              yield send(b"HTTP/1.1 " + buffer[start + 8:end + 2])
+            else:
+              yield send(b"HTTP/1.1 200 OK\r\n")
+        yield send(buffer)
+      except BlockingIOError:
+        pass
+  finally:
+    os.close(p2out)
+    if p1in:
+      os.close(p1in)
+
+# Send a HTTP response header.
+def sendresponse(status, headers = {}):
+  head = []
+  head.append(status)
+  head.append(b"Date: " + rfcdate(time.time()))
+  # "no-cache" means "cache, but check if the ETag has changed".
+  head.append(b"Cache-Control: no-cache")
+  if not b"Content-Length" in headers and not b"Transfer-Encoding" in headers:
+    head.append(b"Content-Length: 0")
+  for h in headers:
+    if headers[h] != None:
+      head.append(h + b": " + headers[h])
+  head.append(b"")
+  head.append(b"")
+  yield send(b"\r\n".join(head))
+
+# Get the Content-Length header for a file.
+def getcontentlength(s):
+  if s == None:
+    return b"0"
+  return b"%d" % s.size
+
+# Get the Content-Type header for a file, from its extension.
+def getcontenttype(path):
+  types = {
+           b".HTML": b"text/html", b".HTM": b"text/html",
+           b".JS": b"text/javascript", b".CSS": b"text/css",
+           b".TXT": b"text/plain", b".CSV": b"text/csv",
+           b".MD": b"text/markdown",
+           b".JPG": b"image/jpeg", b".JPEG": b"image/jpeg",
+           b".PNG": b"image/png", b".SVG": b"image/svg+xml",
+           b".PDF": b"application/pdf",
+           b".APK": b"application/vnd.android.package-archive",
+           b".ODT": b"application/vnd.oasis.opendocument.text",
+           b".ODS": b"application/vnd.oasis.opendocument.spreadsheet",
+           b".ODP": b"application/vnd.oasis.opendocument.presentation",
+           b".MP3": b"audio/mpeg", b".MP4": b"video/mp4",
+           b".VCF": b"text/vcard", b".ICS": b"text/calendar"}
+  for e in types:
+    if path.upper().endswith(e):
+      return types[e]
+  return b"application/octet-stream"
+
+# Get the Last-Modified header for a file.
+def getlastmodified(s):
+  if s == None:
+    return None
+  return rfcdate(s.mtime)
+
+# Get a stable ETag for a file, by hashing its size and mtime.
+# The touch() function ensures the mtime changes when the file changes.
+def getetag(s):
+  if s == None:
+    return b"0"
+  return b"%d" % hash(b"%d,%d" % (s.size, s.mtime))
+
+# Get a WebDAV <prop> element for a file.
+class DAVType: pass
+DAVTYPE_DEFAULT = DAVType()
+DAVTYPE_ADDRESSBOOKHOMESET = DAVType()
+DAVTYPE_ADDRESSBOOKS = DAVType()
+DAVTYPE_ADDRESSBOOKMULTIGET = DAVType()
+DAVTYPE_CALENDARHOMESET = DAVType()
+DAVTYPE_CALENDARS = DAVType()
+DAVTYPE_CALENDARMULTIGET = DAVType()
+def davresponse(href, path, types):
+  result = []
+  s = stat(path)
+  if s:
+    etag = getetag(s)
+    lastmodified = getlastmodified(s)
+    if s.isdir:
+      if not href.endswith(b"/"):
+        href += b"/"
+      for type in [DAVTYPE_DEFAULT, DAVTYPE_ADDRESSBOOKS, DAVTYPE_CALENDARS]:
+        if type in types:
+          result += [b"<response><href>", href, b"</href><propstat>",
+                     b"<status>HTTP/1.1 200 OK</status><prop>",
+                     b"<getetag>", etag, b"</getetag>",
+                     b"<getlastmodified>", lastmodified, b"</getlastmodified>",
+                     b"<resourcetype><collection />"]
+          if type == DAVTYPE_ADDRESSBOOKS:
+            result.append(b"<CARD:addressbook />")
+          elif type == DAVTYPE_CALENDARS:
+            result.append(b"<CAL:calendar />")
+          result.append(b"</resourcetype>")
+          if type == DAVTYPE_CALENDARS:
+            result += [b"<calendar-color xmlns=\"http://apple.com/ns/ical/\">",
+                       colour(href), b"</calendar-color>"]
+          if DAVTYPE_ADDRESSBOOKHOMESET in types:
+            result.append(b"<CARD:addressbook-home-set>"\
+                          b"<href>.</href>"\
+                          b"</CARD:addressbook-home-set>")
+          if DAVTYPE_CALENDARHOMESET in types:
+            result.append(b"<CAL:calendar-home-set>"\
+                          b"<href>.</href>"\
+                          b"</CAL:calendar-home-set>")
+          result.append(b"</prop></propstat></response>")
+    else:
+      contenttype = getcontenttype(path)
+      if DAVTYPE_ADDRESSBOOKMULTIGET in types and contenttype != b"text/vcard":
+        return b""
+      if DAVTYPE_CALENDARMULTIGET in types and contenttype != b"text/calendar":
+        return b""
+      contentlength = getcontentlength(s)
+      result = [b"<response><href>", href, b"</href><propstat>",
+                b"<status>HTTP/1.1 200 OK</status><prop>",
+                b"<getetag>", etag, b"</getetag>",
+                b"<getlastmodified>", lastmodified, b"</getlastmodified>",
+                b"<getcontenttype>", contenttype, b"</getcontenttype>",
+                b"<getcontentlength>", contentlength, b"</getcontentlength>"]
+      if DAVTYPE_ADDRESSBOOKMULTIGET in types:
+        result.append(b"<CARD:address-data>")
+        f = open(path, "rb")
+        result.append(f.read(BUF_SIZE))
+        f.close()
+        result.append(b"</CARD:address-data>")
+      if DAVTYPE_CALENDARMULTIGET in types:
+        result.append(b"<CAL:calendar-data>")
+        f = open(path, "rb")
+        result.append(f.read(BUF_SIZE))
+        f.close()
+        result.append(b"</CAL:calendar-data>")
+      result.append(b"</prop></propstat></response>")
+  return b"".join(result)
+
+def handle(addr):
+  keepalive = True
+  while keepalive:
+    tmppath = None
+    try:
+      method, href, query, headers, buffer = yield recvrequest()
+      keepalive = headers.CONNECTION == b"keep-alive"
+    
+      # Redirect non-local connections to HTTPS
+      if not (addr[0] == 127 or addr[0] == 10 or \
+              (addr[0] == 192 and addr[1] == 168) or
+              (addr[0] == 172 and addr[1] >= 16 and addr[1] < 32)):
+        location = b"https://" + (headers.HOST or b"") + href
+        yield sendresponse(b"HTTP/1.1 301 Moved permanently",
+                           {b"Location": location})
+        break
+
+      # Authenticate the connection
+      path = hreftopath(href)
+      if not AUTHORIZE(method, path, query, headers):
+        if headers.AUTHORIZATION:
+          yield sendresponse(b"HTTP/1.1 403 Forbidden")
+        else:
+          yield sendresponse(b"HTTP/1.1 401 Unauthorized",
+                             {b"WWW-Authenticate": b"Basic"})
+        if headers.CONTENT_LENGTH:
+          # Better to close the connection than wait for the request body
+          break
+        else:
+          continue
+      
+      # Spawn a CGI process if required
+      cgi = None
+      for k in CGI_BIN:
+        if path.startswith(k):
+          cgi = k
+          break
+      if cgi:
+        yield spawncgi(cgi, method, path, query, headers, buffer)
+        break
+
+      # Map the requested path onto the filesystem
+      path = MAP_PATH(method, path, query, headers)
+
+      # Deal with the request body
+      requestlength = int(headers.CONTENT_LENGTH or 0)
+      if method in [b"PUT", b"APPEND"] and requestlength > BUF_SIZE:
+        # For PUT and APPEND requests, put the body in a temporary file
+        tmppath = path.rsplit(b"/", 1)[0] + b"/." + tmpname()
+        try:
+          f = open(tmppath, "wb")
+          while requestlength > 0:
+            f.write(buffer[:requestlength])
+            requestlength -= len(buffer)
+            if requestlength > 0:
+              buffer = yield recv(requestlength)
+        finally:
+          f.close()
+        buffer = None
+      else:
+        # Otherwise keep the first BUF_SIZE bytes and discard the rest
+        bufferlength = min(BUF_SIZE, requestlength)
+        while len(buffer) < bufferlength:
+          buffer += yield recv(bufferlength - len(buffer))
+        requestlength -= bufferlength
+        while requestlength > 0:
+          requestlength -= len((yield recv(min(BUF_SIZE, requestlength))))
+
+      s = stat(path)
+      etag = getetag(s)
+      if headers.IF_MATCH and headers.IF_MATCH != etag:
+        yield sendresponse(b"HTTP/1.1 412 Precondition failed")
+        continue
+      if headers.PREFER and b"wait=" in headers.PREFER:
+        while (headers.IF_NONE_MATCH == etag) or \
+              (s and headers.IF_NONE_MATCH == b"*"):
+          yield WAIT_YIELD
+          if path in touched:
+            s = stat(path)
+            etag = getetag(s)
+      if (headers.IF_NONE_MATCH == etag) or \
+         (s and headers.IF_NONE_MATCH == b"*"):
+        if method in [b"GET", b"HEAD"]:
+          yield sendresponse(b"HTTP/1.1 304 Not modified",
+                             {b"Last-Modified": getlastmodified(s),
+                              b"ETag": etag})
+        else:
+          yield sendresponse(b"HTTP/1.1 412 Precondition failed");
+        continue
+      if method == b"OPTIONS":
+        yield sendresponse(b"HTTP/1.1 200 OK",
+                           {b"DAV": b"1", 
+                            b"Allow": b"OPTIONS, HEAD, PROPFIND, GET, PUT, "\
+                                      b"MKCOL, COPY, MOVE, DELETE, APPEND"})
+        continue
+      elif method in [b"HEAD", b"GET", b"PROPFIND", b"REPORT"]:
+        contenttype = getcontenttype(path)
+        contentencoding = None
+        lastmodified = getlastmodified(s)
+        separator = path.find(b"/_client/")
+        if separator != -1:
+          path = CLIENT_ROOT + path[separator + 8:]
+          if stat(path + b".gz"):
+            path = path + b".gz"
+            contentencoding = b"gzip"
+          s = stat(path)
+          etag = getetag(s)
+          lastmodified = getlastmodified(s)
+        if s == None:
+          yield sendresponse(b"HTTP/1.1 404 Not found")
+          continue
+        if s.isdir and not href.endswith(b"/"):
+          yield sendresponse(b"HTTP/1.1 302 Moved", 
+                             {b"Location": href + b"/"})
+          continue
+        if method in [b"HEAD", b"GET"]:
+          if s.isdir:
+            path = CLIENT_ROOT + b"/index.html"
+            contenttype = b"text/html"
+            if stat(path + b".gz"):
+              path = path + b".gz"
+              contentencoding = b"gzip"
+            s = stat(path)
+            if s == None:
+              yield sendresponse(b"HTTP/1.1 404 Not found")
+              continue
+          start = 0
+          length = s.size
+          if headers.RANGE and headers.RANGE.startswith(b"bytes="):
+            try:
+              rangestart, rangeend = headers.RANGE[6:].split(b"-")
+              rangestart = int(rangestart)
+              try:
+                rangeend = int(rangeend)
+              except:
+                rangeend = length - 1
+              start = min(length, rangestart)
+              length = min(length - 1, rangeend) - start + 1
+            except:
+              pass
+            contentrange = b"bytes %d-%d/%d" % (start, start + length - 1, s.size)
+            yield sendresponse(b"HTTP/1.1 206 Partial", 
+                               {b"Content-Length": b"%d" % length, 
+                                b"Content-Type": contenttype,
+                                b"Content-Encoding": contentencoding,
+                                b"Last-Modified": lastmodified,
+                                b"ETag": etag,
+                                b"Content-Range": contentrange})
+          else:
+            yield sendresponse(b"HTTP/1.1 200 OK",
+                               {b"Content-Length": b"%d" % length,
+                                b"Content-Type": contenttype,
+                                b"Content-Encoding": contentencoding,
+                                b"Last-Modified": lastmodified,
+                                b"ETag": etag})
+          if method == b"GET":
+            f = open(path, "rb")
+            try:
+              f.seek(start)
+              while length > 0:
+                sent = yield send(f.read(min(length, BUF_SIZE)))
+                length -= BUF_SIZE
+            finally:
+              f.close()
+          continue
+        if method in [b"PROPFIND", b"REPORT"]:
+          types = {}
+          types[DAVTYPE_DEFAULT] = True
+          if buffer.find(b"-home-set") != -1:
+            if buffer.find(b"addressbook-home-set") != -1:
+              types[DAVTYPE_ADDRESSBOOKHOMESET] = True
+            if buffer.find(b"calendar-home-set") != -1:
+              types[DAVTYPE_CALENDARHOMESET] = True
+          else:
+            if buffer.find(b"urn:ietf:params:xml:ns:carddav") != -1:
+              types[DAVTYPE_ADDRESSBOOKS] = True
+            if buffer.find(b"urn:ietf:params:xml:ns:caldav") != -1:
+              types[DAVTYPE_CALENDARS] = True
+            if buffer.find(b"addressbook-multiget") != -1:
+              types[DAVTYPE_ADDRESSBOOKMULTIGET] = True
+            if buffer.find(b"calendar-multiget") != -1:
+              types[DAVTYPE_CALENDARMULTIGET] = True
+          yield sendresponse(b"HTTP/1.1 207 Multi-Status",
+                             {b"Content-Type": b"text/xml",
+                              b"Transfer-Encoding": b"chunked",
+                              b"ETag": getetag(s)})
+          outbuffer = [b"<?xml version=\"1.0\" encoding=\"utf-8\" ?>\r\n"\
+                       b"<multistatus xmlns=\"DAV:\""\
+                       b" xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\""\
+                       b" xmlns:CAL=\"urn:ietf:params:xml:ns:caldav\">"]
+          outbuffersize = len(outbuffer[0])
+          if method == b"PROPFIND":
+            outbuffer.append(davresponse(href, path, types))
+            outbuffersize += len(outbuffer[-1])
+          if s.isdir and (method == b"REPORT" or headers.DEPTH == b"1"):
+            if method == b"REPORT" and buffer.find(b"-multiget") != -1:
+              def getfiles(buffer):
+                for href in buffer.split(b"</href>")[:-1]:
+                  yield hreftopath(href.rsplit(b"<href>", 1)[1].rsplit(b"/", 1)[-1])
+              files = getfiles(buffer)
+            else:
+              def getfiles(path):
+                for file in os.listdir(path):
+                  if file != b"lost+found" and not file.startswith(b"."):
+                    yield file
+              files = getfiles(path)
+            for file in files:
+              href2 = href + urlencode(file)
+              path2 = path + file
+              outbuffer.append(davresponse(href2, path2, types))
+              outbuffersize += len(outbuffer[-1])
+              if outbuffersize > BUF_SIZE:
+                yield send(b"\r\n".join([b"%x" % outbuffersize,
+                                             b"".join(outbuffer), b""]))
+                outbuffer = []
+                outbuffersize = 0
+          outbuffer.append(b"</multistatus>")
+          outbuffersize += len(outbuffer[-1])
+          yield send(b"\r\n".join([b"%x" % outbuffersize, 
+                                       b"".join(outbuffer), b"0\r\n\r\n"]))
+          del outbuffer
+          continue
+      elif method in [b"LOCK", b"UNLOCK"]:
+        # LOCK and UNLOCK are no-ops, but Windows 10 WebDAV client needs them
+        # to return something.
+        outbuffer = b"<?xml version=\"1.0\" encoding=\"utf-8\" ?>"\
+                    b"<prop xmlns=\"DAV:\"><lockdiscovery><activelock>"\
+                    b"<lockscope><exclusive/></lockscope>"\
+                    b"<locktype><write/></locktype>"\
+                    b"<depth>1</depth>"\
+                    b"<owner><href>nobody</href></owner>"\
+                    b"<timeout>Second-345600</timeout>"\
+                    b"<locktoken><href>noop</href></locktoken>"\
+                    b"</activelock></lockdiscovery></prop>"
+        yield sendresponse(b"HTTP/1.1 200 OK",
+                           {b"Content-Length": b"%d" % len(outbuffer)})
+        yield send(outbuffer)
+        del outbuffer
+        continue
+      elif method == b"PUT":
+        try:
+          os.rename(tmppath, path)
+        except:
+          try:
+            os.remove(tmppath)
+          except:
+            pass
+          yield sendresponse(b"HTTP/1.1 500 Not created")
+          continue
+        touch(path)
+        s = stat(path)
+        yield sendresponse(b"HTTP/1.1 201 Created",
+                           {b"Last-Modified": getlastmodified(s),
+                            b"ETag": getetag(s)})
+        continue
+      elif method == b"MKCOL":
+        try:
+          os.mkdir(path)
+        except:
+          yield sendresponse(b"HTTP/1.1 500 Not created")
+          continue
+        touch(path)
+        s = stat(path)
+        yield sendresponse(b"HTTP/1.1 201 Created",
+                           {b"Last-Modified": getlastmodified(s),
+                            b"ETag": getetag(s)})
+        continue
+      elif method in [b"MOVE", b"COPY"]:
+        if s == None:
+          yield sendresponse(b"HTTP/1.1 404 Not found")
+          continue
+        dest = hreftopath(headers.DESTINATION, href)
+        if not AUTHORIZE(method, dest, b"", headers):
+          yield sendresponse(b"HTTP/1.1 403 Forbidden")
+          continue
+        dest = MAP_PATH(method, dest, b"", headers)
+        try:
+          if method == b"COPY":
+            try:
+              f1 = open(path, "rb")
+              try:
+                f2 = open(dest, "wb")
+                while True:
+                  buffer = f1.read(BUF_SIZE)
+                  if len(buffer) == 0:
+                    break
+                  f2.write(buffer)
+              finally:
+                f2.close()
+            finally:
+              f1.close()
+          else:
+            os.rename(path, dest)
+        except:
+          try:
+            os.remove(dest)
+          except:
+            pass
+          yield sendresponse(b"HTTP/1.1 500 Not moved")
+          continue
+        if method == b"MOVE":
+          touch(path)
+        touch(dest)
+        s = stat(dest)
+        yield sendresponse(b"HTTP/1.1 201 Created",
+                           {b"Location": headers.DESTINATION,
+                            b"Last-Modified": getlastmodified(s),
+                            b"ETag": getetag(s)})
+        continue
+      elif method == b"DELETE":
+        try:
+          os.remove(path)
+        except:
+          yield sendresponse(b"HTTP/1.1 500 Not deleted")
+          continue
+        touch(path)
+        yield sendresponse(b"HTTP/1.1 204 No content")
+        continue
+      elif method in [b"PUT", b"APPEND"]:
+        try:
+          if method == b"APPEND":
+            try:
+              f1 = open(tmppath, "rb")
+              if buffer:
+                f1.write(buffer)
+              else:
+                try:
+                  f2 = open(path, "ab")
+                  while True:
+                    buffer = f1.read(BUF_SIZE)
+                    if len(buffer) == 0:
+                      break
+                    f2.write(buffer)
+                finally:
+                  f2.close()
+            finally:
+              f1.close()
+          else:
+            os.rename(tmppath, path)
+        except:
+          yield sendresponse(b"HTTP/1.1 500 Not written")
+          continue
+        touch(path)
+        s = stat(path)
+        yield sendresponse(b"HTTP/1.1 201 Created",
+                           {b"Last-Modified": getlastmodified(s),
+                            b"ETag": getetag(s)})
+        continue
+      else:
+        break
+    finally:
+      if tmppath:
+        try:
+          os.remove(tmppath)
+        except:
+          pass
+
+
+
+## Some classes, constants and types we need for coroutines
+class Wait: pass
+WAIT_INPUT = Wait() # for available input from socket
+WAIT_OUTPUT = Wait() # until able to send to socket
+WAIT_YIELD = Wait() # allow other processing to happen
+class SocketClosed(Exception): pass
+Generator = type((lambda:(yield))())
+
+sockets = {}
+coroutines = {}
+waiters = {}
+serverfileno = server.fileno()
+poller = select.poll()
+poller.register(serverfileno, select.POLLIN)
+
+while True:
+  events = []
+  touched = {}
+  closed = {}
+  for fileno, event in poller.poll(1000):
+    if fileno in waiters:
+      # A client that was waiting has closed
+      closed[fileno] = True
+      del(waiters[fileno])
+    events.append(fileno)
+  # Check in with all the waiting clients
+  for fileno in waiters:
+    events.append(fileno)
+  waiters = {}
+  for fileno in events:
+    if fileno == serverfileno:
+      socketfd, addr = server.accept()
+      socketfd.setblocking(False)
+      fileno = socketfd.fileno()
+      sockets[fileno] = socketfd
+      if type(addr) == tuple:
+        coroutines[fileno] = [handle([int(c) for c in addr[0].split(".")])]
+      else:
+        coroutines[fileno] = [handle([addr[4], addr[5], addr[6], addr[7]])]
+      poller.register(fileno, select.POLLIN)
+    else:
+      socketfd = sockets[fileno]
+      done = False
+      if fileno in closed:
+        result = SocketClosed()
+      else:
+        result = None
+      exception = None
+      while not done:
+        try:
+          if isinstance(result, Exception):
+            result = coroutines[fileno][-1].throw(result)
+          else:
+            result = coroutines[fileno][-1].send(result)
+          if isinstance(result, Generator):
+            coroutines[fileno].append(result)
+            result = None
+          elif isinstance(result, Wait):
+            if result == WAIT_INPUT:
+              poller.modify(fileno, select.POLLIN)
+            elif result == WAIT_OUTPUT:
+              poller.modify(fileno, select.POLLIN | select.POLLOUT)
+            elif result == WAIT_YIELD:
+              poller.modify(fileno, select.POLLIN)
+              waiters[fileno] = True
+            done = True
+        except Exception as e:
+          coroutines[fileno].pop()
+          if len(coroutines[fileno]) == 0:
+            del(coroutines[fileno])
+            sockets[fileno].close()
+            del(sockets[fileno])
+            poller.unregister(fileno)
+            done = True
+          if type(e) != StopIteration:
+            if done:
+              if type(e) != SocketClosed:
+                try:
+                  import traceback
+                  traceback.print_exc()
+                except:
+                  sys.print_exception(e)
+            else:
+              result = e

@@ -842,6 +842,7 @@ while True:
     if fileno == serverfileno:
       socketfd, addr = server.accept()
       socketfd.setblocking(False)
+      socketfd.setsockopt(6, 1, 1) # (IPPROTO_TCP, TCP_NODELAY, 1)
       fileno = socketfd.fileno()
       sockets[fileno] = socketfd
       if type(addr) == tuple:

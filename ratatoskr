@@ -53,6 +53,7 @@ try:
     remove = func("i", "remove", "s")
     rename = func("i", "rename", "ss")
     utime_ = func("i", "utime", "sP")
+    waitpid = func("i", "waitpid", "iii")
     write_ = func("i", "write", "iPi")
     def listdir(path):
       for f in uos.ilistdir(path):
@@ -299,6 +300,7 @@ def spawncgi(cgi, method, path, query, headers, buffer):
     if os.fork() == 0:
       os.execl(CGI_BIN[cgi], CGI_BIN[cgi])
     os._exit(0)
+  os.waitpid(pid, 0)
   os.close(p1out)
   os.close(p2in)
   fcntl.fcntl(p1in, fcntl.F_SETFL, os.O_NONBLOCK)

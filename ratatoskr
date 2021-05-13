@@ -512,7 +512,7 @@ def handle(addr):
 
       # Deal with the request body
       requestlength = int(headers.CONTENT_LENGTH or 0)
-      if method in [b"PUT", b"APPEND"] and requestlength > BUF_SIZE:
+      if method in [b"PUT", b"APPEND"]:
         # For PUT and APPEND requests, put the body in a temporary file
         tmppath = path.rsplit(b"/", 1)[0] + b"/." + tmpname()
         try:
@@ -704,22 +704,6 @@ def handle(addr):
                            {b"Content-Length": b"%d" % len(outbuffer)})
         yield send(outbuffer)
         del outbuffer
-        continue
-      elif method == b"PUT":
-        try:
-          os.rename(tmppath, path)
-        except:
-          try:
-            os.remove(tmppath)
-          except:
-            pass
-          yield sendresponse(b"HTTP/1.1 500 Not created")
-          continue
-        touch(path)
-        s = stat(path)
-        yield sendresponse(b"HTTP/1.1 201 Created",
-                           {b"Last-Modified": getlastmodified(s),
-                            b"ETag": getetag(s)})
         continue
       elif method == b"MKCOL":
         try:

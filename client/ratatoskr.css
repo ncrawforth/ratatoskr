@@ -1,0 +1,215 @@
+@import "/_client/thirdparty/picnic.css";
+:root {
+  --grey: #333;
+  --black: #111;
+  --white: #fff;
+  --overlay: rgba(230, 230, 230, 0.75);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --grey: #bbb;
+    --black: #fff;
+    --white: #111;
+    --overlay: rgba(50, 50, 50, 0.75);
+  }
+}
+* {
+  text-size-adjust: none;
+  -ms-text-size-adjust: none;
+  -webkit-text-size-adjust: none;
+  -moz-text-size-adjust: none;
+  max-height: 10000000px;
+}
+body {
+  background: var(--white);
+  color: var(--black);
+  font-size: initial;
+  height: auto;
+  padding-bottom: 0.1px;
+}
+input, textarea, select, .card, .modal .overlay ~ * {
+  background: var(--white);
+}
+tr:nth-child(even), .modal .overlay, nav .show:checked ~ .burger {
+  background: var(--overlay) !important;
+}
+.checkable:after {
+  color: var(--black) !important;
+}
+nav {
+  color: white;
+}
+input, textarea, .select select, nav .show:checked ~ .menu>*:nth-child(1), nav .show:checked ~ .menu>*:nth-child(2), nav .show:checked ~ .menu>*:nth-child(3), nav .show:checked ~ .menu>*:nth-child(4), nav .show:checked ~ .menu>*:nth-child(5), nav .show:checked ~ .menu>*:nth-child(6), nav .show:checked ~ .menu>* {
+  transition: none;
+}
+article {
+  width: 54rem !important;
+  max-width: 90% !important;
+}
+dt {
+  font-weight: bold;
+  margin-top: 1em;
+  margin-bottom: 0.3em;
+}
+dd {
+  margin-inline-start: 0;
+  margin-bottom: 0.3em;
+}
+#spinner, .spinner {
+  position: fixed;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--overlay);
+  z-index: 9999;
+  cursor: wait;
+}
+#spinner div, .spinner div {
+  position: fixed;
+  top: calc(50% - 1rem);
+  left: calc(50% - 1rem);
+  width: 2rem;
+  height: 2rem;
+  border: 0.2rem solid black;
+  border-bottom: 0.2rem solid rgba(0,0,0,0) !important;
+  border-right: 0.2rem solid rgba(0,0,0,0) !important;
+  border-radius: 50%;
+  animation: spin 1s ease-in-out infinite;
+  transform: rotate(45deg);
+}
+#spinner div:nth-child(1), .spinner div:nth-child(1) {
+  border-color: #CC99FF;
+}
+#spinner div:nth-child(2), .spinner div:nth-child(2) {
+  zoom: 1.2;
+  animation-delay: 100ms;
+  border-color: #A9D1F7;
+}
+#spinner div:nth-child(3), .spinner div:nth-child(3) {
+  zoom: 1.44;
+  animation-delay: 200ms;
+  border-color: #B4F0A7;
+}
+#spinner div:nth-child(4), .spinner div:nth-child(4) {
+  zoom: 1.728;
+  animation-delay: 300ms;
+  border-color: #FFFFBF;
+}
+#spinner div:nth-child(5), .spinner div:nth-child(5) {
+  zoom: 2.0736;
+  animation-delay: 400ms;
+  border-color: #FFDFBE;
+}
+#spinner div:nth-child(6), .spinner div:nth-child(6) {
+  zoom: 2.48832;
+  animation-delay: 500ms;
+  border-color: #FFB1B0;
+}
+@keyframes spin {
+  from {transform: rotate(45deg);}
+  to {transform: rotate(405deg);}
+}
+@keyframes fadein {
+  from {opacity: 0;}
+  to {opacity: 1;}
+}
+.brand {
+  width: 0;
+}
+.logo {
+  display: inline-block;
+  width: 2em;
+  background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-1 -1 26 26'><path fill='white' d='M16,24 A7.5,7.5,0,0,0,18,12 A2,2,0,1,1,24,6 A7.5,7.5,0,1,0,12,13 A11,11,0,0,1,16,23 A12,12,0,0,0,7,11 A3,3,0,0,0,6,9 A3,3,0,0,0,5,11 A5,5,0,0,0,1,16.5 A5,5,0,0,0,3,17.5 A7,7,0,0,1,8,24' /></svg>");
+}
+.menu {
+  background: inherit !important;
+}
+.overlay {
+  cursor: not-allowed;
+}
+nav .show:checked ~ .burger {
+  transition: none !important;
+  box-shadow: none !important;
+}
+.button:hover, button:hover {
+  box-shadow: inset 0 0 0 99em rgb(0 0 0 / 25%);
+}
+.icon {
+  position: absolute;
+  top: 0;
+  left: 1.5em;
+  width: 2em;
+  height: 2em;
+  object-fit: contain;
+}
+#folder_div, #index_div, #file_div {
+  background: var(--white);
+  position: absolute;
+  top: 3rem;
+  right: 0;
+  left: 0;
+  overflow: auto;
+}
+
+@page {margin: 3mm;}
+@page a4portrait {size: 210mm 297mm;}
+@page a4landscape {size: 297mm 210mm;}
+@page letterportrait {size: 215.9mm 279.4mm;}
+@page letterlandscape {size: 279.4mm 215.9mm;}
+@media screen {
+  .a4portrait, .a4landscape, .letterportrait, .letterlandscape {
+    background: white;
+    color: black;
+    margin: 0.5cm auto 1cm auto;
+    box-shadow: 0 0.5cm 0.5cm #444;
+    border: 3mm solid white;
+    box-sizing: content-box;
+  }
+  .a4portrait > *, .a4landscape > *, .letterportrait > *, .letterlandscape > * {
+    box-sizing: border-box;
+  }
+}
+@media screen and (max-width: 216mm) {.a4portrait {zoom: 0.9;}}
+@media screen and (max-width: 195mm) {.a4portrait {zoom: 0.8;}}
+@media screen and (max-width: 174mm) {.a4portrait {zoom: 0.7;}}
+@media screen and (max-width: 153mm) {.a4portrait {zoom: 0.6;}}
+@media screen and (max-width: 132mm) {.a4portrait {zoom: 0.5;}}
+@media screen and (max-width: 303mm) {.a4landscape {zoom: 0.9;}}
+@media screen and (max-width: 273mm) {.a4landscape {zoom: 0.8;}}
+@media screen and (max-width: 243mm) {.a4landscape {zoom: 0.7;}}
+@media screen and (max-width: 213mm) {.a4landscape {zoom: 0.6;}}
+@media screen and (max-width: 184mm) {.a4landscape {zoom: 0.5;}}
+@media screen and (max-width: 221mm) {.letterportrait {zoom: 0.9;}}
+@media screen and (max-width: 200mm) {.letterportrait {zoom: 0.8;}}
+@media screen and (max-width: 178mm) {.letterportrait {zoom: 0.7;}}
+@media screen and (max-width: 157mm) {.letterportrait {zoom: 0.6;}}
+@media screen and (max-width: 135mm) {.letterportrait {zoom: 0.5;}}
+@media screen and (max-width: 285mm) {.letterlandscape {zoom: 0.9;}}
+@media screen and (max-width: 257mm) {.letterlandscape {zoom: 0.8;}}
+@media screen and (max-width: 229mm) {.letterlandscape {zoom: 0.7;}}
+@media screen and (max-width: 201mm) {.letterlandscape {zoom: 0.6;}}
+@media screen and (max-width: 173mm) {.letterlandscape {zoom: 0.5;}}
+@media print {
+  body {
+    min-width: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  nav, .modal, .overlay {
+    display: none;
+  }
+  #file_div, #index_div {
+    top: 0 !important;
+    min-height: 100vh !important;
+  }
+}
+.a4portrait, .a4landscape, .letterportrait, .letterlandscape {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  page-break-after: always;
+}
+.a4portrait {width: 204mm; height: 290.5mm; page: a4portrait;}
+.a4landscape {width: 291mm; height: 203.5mm; page: a4landscape;}
+.letterportrait {width: 209.9mm; height: 272.9mm; page: letterportrait;}
+.letterlandscape {width: 273.4mm; height: 209.4mm; page: letterlandscape;}

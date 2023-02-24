@@ -1,0 +1,521 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1, minimum-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <meta name="google" value="notranslate">
+    <link rel="stylesheet" href="/_client/ratatoskr.css">
+    <style id="dynamicstyle"></style>
+    <title class="filename">Ratatoskr</title>
+  </head>
+  
+  <body>
+    <nav id="nav">
+      <div class="brand">
+        <span class="logo"></span>
+        <span class="filename">Ratatoskr</span>
+      </div>
+      <input id="nav_menu" type="checkbox" class="show">
+      <label for="nav_menu" class="burger pseudo button">&#8801;</label>
+      <div id="menu_div" class="menu">
+        <a id="create_button" class="folder button" href>Create</a>
+        <a id="upload_button" class="folder button">Upload</a>
+        <a id="download_button" class="file button">Download</a>
+        <a id="delete_button" class="file folder button">Delete</a>
+        <a id="rename_button" class="file folder button">Rename</a>
+        <a id="move_button" class="file folder button">Move</a>
+        <a id="cast_button" class="file button">Cast</a>
+        <a id="print_button" class="file index button">Print</a>
+        <a id="send_button" class="file folder index button">Send</a>
+        <a id="folder_button" class="index button">View files</a>
+      </div>
+    </nav>
+    
+    <div class="modal"><input type="checkbox" id="modal" class="show" />
+      <label for="modal" class="overlay"></label>
+      <article id="action_div"></article>
+    </div>
+    
+    <div id="folder_div" class="folder"></div>
+    <div id="index_div" class="index"></div>
+    <div id="file_div" class="file"></div>
+    
+  </body>
+    
+  <script>
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    let entries = null;
+    let thumbnails = null;
+    let currentlayout = null;
+    
+    let hreftoname = function(href) {
+      if (href == "/") href = location.host;
+      let name = decodeURIComponent(href.replace(/\/$/, "").replace(/^.*\//g, ""));
+      name = name.replace(/_$/, ".").replace(/_\./, "?.").replace(/_ /g, ": ").replace(/_/g, "/");
+      return name;
+    };
+    
+    let hreftocolour = function(href, dark) {
+      let h = 5381;
+      for (let i = href.length - 1; i >= 0; i--) {
+        h = (h * 33 + href.charCodeAt(i)) % 4294967296;
+      }
+      let H = h % 360;
+      let S = Math.floor(h / 360) % 60 + 30;
+      let r = Math.floor(Math.cos(H * Math.PI / 180) * (S * 0.8) + 150);
+      let g = Math.floor(Math.cos((H - 120) * Math.PI / 180) * (S * 0.6) + 150);
+      let b = Math.floor(Math.cos((H + 120) * Math.PI / 180) * S + 150);
+      if (dark) [r, g, b] = [Math.floor(r * 0.8), Math.floor(g * 0.8), Math.floor(b * 0.8)];
+      return "#" + (((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1));
+    };
+    
+    let contenttypetoicon = function(contenttype) {
+      let [major, minor] = contenttype.split("/");
+      let path = "M13,9V3.5L18.5,9M6,2C4.89,2 4,2.89 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2H6Z";
+      if (major == "folder") {
+        if (minor == "open") {
+          path = "M19,20H4C2.89,20 2,19.1 2,18V6C2,4.89 2.89,4 4,4H10L12,6H19A2,2 0 0,1 21,8H21L4,8V18L6.14,10H23.21L20.93,18.5C20.7,19.37 19.92,20 19,20Z";
+        } else {
+          path = "M10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6H12L10,4Z";
+        }
+      } else if (major == "image") {
+        path = "M8.5,13.5L11,16.5L14.5,12L19,18H5M21,19V5C21,3.89 20.1,3 19,3H5A2,2 0 0,0 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19Z";
+      } else if (major == "video" || major == "audio") {
+        path = "M19 3H5C3.89 3 3 3.89 3 5V19C3 20.1 3.9 21 5 21H19C20.1 21 21 20.1 21 19V5C21 3.89 20.1 3 19 3M10 16V8L15 12";
+      }
+      let r = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      r.setAttribute("class", "icon");
+      r.setAttribute("viewBox", "0 0 24 24");
+      r.innerHTML = "<path fill=\"currentColor\" d=\"" + path + "\" />";
+      return r;
+    };
+    
+    let createbutton = function(type, text, fn) {
+      let button = document.createElement("a");
+      button.className = "extra " + type + " button";
+      button.innerText = text;
+      button.addEventListener("click", closemodals);
+      button.onclick = fn;
+      button.style.display = currentlayout == type ? "" : "none";
+      menu_div.insertBefore(button, menu_div.firstChild);
+      return button;
+    };
+
+    let execute = async function(js, type, href, contenttype) {
+      closemodals();
+      await new Promise(function(resolve) {setTimeout(resolve, 300);});
+      if (type == "action") modal.checked = true;
+      let container = document.createElement("div");
+      container.style.position = "relative";
+      container.style.minHeight = "inherit";
+      container.style.padding = "0.1px";
+      let div = document.getElementById(type + "_div");
+      div.innerHTML = "";
+      div.appendChild(container);
+      container.container = container;
+      container.href = href;
+      container.contenttype = contenttype;
+      container.hreftoname = hreftoname;
+      container.hreftocolour = hreftocolour;
+      container.contenttypetoicon = contenttypetoicon;
+      container.spinner = function() {
+        let count = 0;
+        let spinner_div = document.createElement("div");
+        spinner_div.className = "spinner";
+        spinner_div.innerHTML = "<div></div><div></div><div></div><div></div><div></div><div></div>";
+        spinner_div.style.display = "none";
+        div.appendChild(spinner_div);
+        return {
+          start: function() {
+            count++;
+            spinner_div.style.display = count == 0 ? "none" : "block";
+          }, stop: function() {
+            count = Math.max(0, count - 1);
+            spinner_div.style.display = count == 0 ? "none" : "block";
+          }
+        };
+      }();
+      container.createbutton = function(text, fn) {return createbutton(type, text, fn);};
+      container.execute = function(js) {return execute(js, type, href, contenttype);};
+      Object.defineProperty(container, "onresize", {configurable: true, set: function(f) {
+        Object.defineProperty(container, "onresize", {value: f, writable: true});
+        f();
+      }});
+      Object.defineProperty(container, "onfolderchanged", {configurable: true, set: function(f) {
+        Object.defineProperty(container, "onfolderchanged", {value: f, writable: true});
+        if (entries) f(entries);
+      }});
+      Object.defineProperty(container, "onthumbnailschanged", {configurable: true, set: function(f) {
+        Object.defineProperty(container, "onthumbnailschanged", {value: f, writable: true});
+        if (thumbnails) f(thumbnails);
+      }});
+      Object.defineProperty(container, "onhashchange", {configurable: true, set: function(f) {
+        Object.defineProperty(container, "onhashchange", {value: f, writable: true});
+      }});
+      for (let button of document.querySelectorAll(".extra.button." + type)) button.remove();
+      try {
+        await (new AsyncFunction("with (this) try {" + js + "} catch (e) {window.error = e; console.error(e); throw e;}").bind(container))();
+      } catch (e) {
+        console.log(e);
+      }
+      if (type == "action") modal.checked = false;
+    }
+
+    let viewers = {};
+    let loadfile = async function(href) {
+      let f = await fetch(href, {method: "HEAD"});
+      let contenttype = f.headers.get("Content-Type");
+      if (!viewers[contenttype]) {
+        let f = await fetch("/_client/viewers/" + contenttype + ".js");
+        if (f.ok) {
+          viewers[contenttype] = await f.text();
+        } else {
+          let f = await fetch("/_client/viewers/" + contenttype.replace(/\/.*$/, "") + "/default.js");
+          if (f.ok) {
+            viewers[contenttype] = await f.text();
+          } else {
+            let f = await fetch("/_client/viewers/default.js");
+            viewers[contenttype] = await f.text();
+          }
+        }
+      }
+      relayout("file");
+      if (contenttype.startsWith("video/") || contenttype.startsWith("audio/") || contenttype == "application/mpegurl") {
+        print_button.style.display = "none";
+      } else {
+        cast_button.style.display = "none";
+      }
+      await execute(viewers[contenttype], "file", href, contenttype);
+    };
+
+    let readdir = function() {
+      let onvisibilitychange = function() {};
+      document.addEventListener("visibilitychange", function() {onvisibilitychange();});
+      let etag = "";
+      return async function() {
+        while (true) {
+          if (document.visibilityState == "hidden") {
+            await new Promise(function(resolve) {
+              onvisibilitychange = resolve;
+            });
+          } else {
+            let req = new XMLHttpRequest();
+            req.open("PROPFIND", ".");
+            req.setRequestHeader("Depth", "1");
+            req.setRequestHeader("If-None-Match", etag);
+            req.setRequestHeader("Prefer", "wait=300");
+            onvisibilitychange = function() {
+              req.abort();
+            };
+            try {
+              await new Promise(function(resolve, reject) {
+                req.onload = req.onabort = resolve;
+                req.onerror = reject;
+                setTimeout(function() {req.send();}, 100);
+              });
+              if (req.status == 404) throw "File not found";
+              let newetag = req.getResponseHeader("ETag");
+              if (newetag != null && newetag != etag) {
+                etag = newetag;
+                return req.responseXML;
+              }
+            } catch {
+              await new Promise(function(resolve) {
+                setTimeout(resolve, 2000);
+              });
+            }
+          }
+        }
+      };
+    }();
+    
+    let updatethumbnails = function() {
+      let running = false;
+      let runagain = false;
+      let cache = null;
+      let img = document.createElement("img");
+      let canvas = document.createElement("canvas");
+      let ctx = canvas.getContext("2d");
+      return async function(onthumbnailschanged) {
+        if (running) {
+          runagain = true;
+          return;
+        }
+        running = true;
+        runagain = false;
+        if (cache == null) {
+          let f = await fetch(".thumbnails.json");
+          cache = JSON.parse("[" + (await f.text()).replace(/^,/, "").replace(/,\w*$/, "") + "]");
+          if (f.status == 404) {
+            await fetch(".thumbnails.json", {method: "PUT"});
+          }
+        }
+        let changed = false;
+        let cleancache = [];
+        for (let entry of entries) {
+          if (entry.contenttype && entry.contenttype.startsWith("image/")) {
+            for (let thumbnail of cache) {
+              if (thumbnail.href == entry.href.replace(/.*\//, "") && thumbnail.etag == entry.etag) {
+                entry.thumbnail = thumbnail.thumbnail;
+                changed = true;
+                cleancache.push(thumbnail);
+              }
+            }
+          }
+        }
+        if ((cache.length - cleancache.length) > 10) {
+          await fetch(".thumbnails.json", {method: "PUT", body: JSON.stringify(cleancache).replace(/^\[/, "").replace(/\]$/, "") + ","});
+        }
+        cache = cleancache;
+        if (changed) {
+          thumbnails = {};
+          for (let entry of entries) if (entry.thumbnail) thumbnails[entry.href] = entry.thumbnail;
+          onthumbnailschanged();
+        }
+        for (let entry of entries) {
+          if (entry.contenttype && entry.contenttype.startsWith("image/") && entry.thumbnail === undefined) {
+            let thumbnail = {href: entry.href.replace(/.*\//, ""), etag: entry.etag, thumbnail: null};
+            try {
+              await new Promise(function(resolve, reject) {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = entry.href;
+              });
+              let w = 96;
+              let h = 96 * img.height / img.width;
+              if (h > 96) {
+                h = 96;
+                w = 96 * img.width / img.height;
+              }
+              canvas.width = w;
+              canvas.height = h;
+              ctx.fillStyle = "white";
+              ctx.fillRect(0, 0, w, h);
+              ctx.drawImage(img, 0, 0, w, h);
+              thumbnail.thumbnail = canvas.toDataURL("image/jpeg", 0.2);
+            } catch (e) {}
+            entry.thumbnail = thumbnail.thumbnail;
+            cache.push(thumbnail);
+            await fetch(".thumbnails.json", {method: "APPEND", body: JSON.stringify(thumbnail) + ","});
+            thumbnails = {};
+            for (let entry of entries) if (entry.thumbnail) thumbnails[entry.href] = entry.thumbnail;
+            onthumbnailschanged();
+            runagain = true;
+            break;
+          }
+        }
+        running = false;
+        if (runagain) return updatethumbnails(onthumbnailschanged);
+      };
+    }();
+    
+    let loadfolder = async function() {
+      let f = await fetch("/_client/index.js");
+      await execute(await f.text(), "folder", location.pathname, "folder/open");
+    };
+    
+    let closemodals = function() {
+      for (let e of document.getElementsByClassName("show")) {
+        e.checked = false;
+      }
+    };
+    
+    let onstatechange = async function() {
+      closemodals();
+      file_div.innerHTML = "";
+      if (!currentlayout) {
+        try {
+          let f = await fetch("index.js");
+          if (!f.ok) throw "No index.js";
+          await execute(await f.text(), "index", location.pathname, "folder/open");
+          history.replaceState("index", "", "");
+        } catch (e) {
+          currentlayout = null;
+          index_div.innerHTML = "";
+          console.error(e);
+        }
+      }
+      if (history.state) relayout(history.state);
+    };
+    window.addEventListener("popstate", onstatechange);
+    
+    let onhashchange = async function() {
+      await onstatechange();
+      if (currentlayout == "index") {
+        if (index_div.firstChild.onhashchange && !(await index_div.firstChild.onhashchange())) {
+          return;
+        }
+        if (location.hash == "") {
+          return;
+        }
+      }
+      if (location.hash == "") {
+        relayout("folder");
+      } else {
+        try {
+          await loadfile(location.pathname + location.hash.replace(/^#/, ""));
+        } catch (e) {console.log(e);}
+      }
+    };
+    window.addEventListener("hashchange", onhashchange);
+    
+    let relayout = function(layout) {
+      if (layout == "file") {
+        for (let e of document.getElementsByClassName("filename")) e.innerText = hreftoname(location.pathname + location.hash.replace(/^#/, "/"));
+      } else {
+        for (let e of document.getElementsByClassName("filename")) e.innerText = hreftoname(location.pathname);
+        file_div.innerHTML = "";
+      }
+      for (let e of document.getElementsByClassName("index")) e.style.display = "none";
+      for (let e of document.getElementsByClassName("file")) e.style.display = "none";
+      for (let e of document.getElementsByClassName("folder")) e.style.display = "none";
+      for (let e of document.getElementsByClassName(layout)) e.style.display = "";
+      currentlayout = layout;
+    };
+    
+    
+    let onresize = async function() {
+      folder_div.style.minHeight = "calc(" + window.innerHeight + "px - 3rem)";
+      index_div.style.minHeight = "calc(" + window.innerHeight + "px - 3rem)";
+      file_div.style.minHeight = "calc(" + window.innerHeight + "px - 3rem)";
+      if (folder_div.firstChild && folder_div.firstChild.onresize) await folder_div.firstChild.onresize();
+      if (index_div.firstChild && index_div.firstChild.onresize) await index_div.firstChild.onresize();
+      if (file_div.firstChild && file_div.firstChild.onresize) await file_div.firstChild.onresize();
+      if (action_div.firstChild && action_div.firstChild.onresize) await action_div.firstChild.onresize();
+    };
+    window.addEventListener("resize", onresize);
+
+    let action = function() {
+      let actions = {};
+      return async function(type) {
+        closemodals();
+        if (!actions[type]) {
+          let f = await fetch("/_client/actions/" + type + ".js");
+          actions[type] = await f.text();
+        }
+        if (file_div.firstChild) {
+          await execute(actions[type], "action", file_div.firstChild.href, file_div.firstChild.contenttype);
+        } else {
+          await execute(actions[type], "action", location.pathname, "folder/open");
+        }
+        closemodals();
+      };
+    }();
+
+    create_button.onclick = function() {
+      action("create");
+      return false;
+    };
+   
+    upload_button.onclick = function() {
+      action("upload");
+      return false;
+    };
+
+    download_button.onclick = function() {
+      action("download");
+      return false;
+    };
+
+    delete_button.onclick = function() {
+      action("delete");
+      return false;
+    };
+
+    rename_button.onclick = function() {
+      action("rename");
+      return false;
+    };
+
+    move_button.onclick = function() {
+      action("move");
+      return false;
+    };
+
+    cast_button.onclick = function() {
+      action("cast");
+      return false;
+    };
+
+    print_button.onclick = function() {
+      action("print");
+      return false;
+    };
+
+    send_button.onclick = function() {
+      action("send");
+      return false;
+    };
+    
+    folder_button.onclick = function() {
+      closemodals();
+      history.pushState("folder", "", ".");
+      onstatechange();
+      return false;
+    };
+
+    nav.style.background = hreftocolour(location.pathname);
+    let buttoncolour = hreftocolour(location.pathname, true);
+    dynamicstyle.innerHTML = ".menu > .button, .menu > button, .modal .overlay ~ * .dangerous {background: " + buttoncolour + ";}";
+    for (let e of document.getElementsByClassName("burger pseudo button")) {
+      e.style.background = buttoncolour;
+    }
+
+    let onkeydown = function(e) {
+      if (e.keyCode == 27) {
+        closemodals();
+      }
+    };
+    window.addEventListener("keydown", onkeydown);
+
+    (async function() {
+      relayout("index");
+      currentlayout = null;
+      loadfolder();
+      onhashchange();
+      onresize();
+      while (true) {
+        let dir = await readdir();
+        entries = [];
+        let responses = dir.getElementsByTagName("response");
+        for (let i = 1; i < responses.length; i++) {
+          let entry = {};
+          entry.href = responses[i].getElementsByTagName("href")[0].firstChild.nodeValue;
+          entry.name = hreftoname(entry.href);
+          let e = responses[i].getElementsByTagName("getcontenttype")[0];
+          if (e) {
+            entry.contenttype = e.firstChild.nodeValue;
+          } else if (responses[i].getElementsByTagName("collection")[0]) {
+            entry.contenttype = "folder/closed";
+          }
+          e = responses[i].getElementsByTagName("getetag")[0];
+          if (e) entry.etag = e.firstChild.nodeValue;
+          e = responses[i].getElementsByTagName("getlastmodified")[0];
+          if (e) entry.lastmodified = new Date(e.firstChild.nodeValue);
+          e = responses[i].getElementsByTagName("getcontentlength")[0];
+          if (e) entry.contentlength = parseInt(e.firstChild.nodeValue);
+          entries.push(entry);
+        }
+        entries.sort(function(a, b) {
+          a = a.href.toLowerCase();
+          b = b.href.toLowerCase();
+          if (a < b) return -1;
+          if (a > b) return 1;
+          return 0;
+        });
+        if (folder_div.firstChild && folder_div.firstChild.onfolderchanged) folder_div.firstChild.onfolderchanged(entries);
+        if (index_div.firstChild && index_div.firstChild.onfolderchanged) index_div.firstChild.onfolderchanged(entries);
+        if (file_div.firstChild && file_div.firstChild.onfolderchanged) file_div.firstChild.onfolderchanged(entries);
+        if (action_div.firstChild && action_div.firstChild.onfolderchanged) action_div.firstChild.onfolderchanged(entries);
+        updatethumbnails(async function() {
+          if (folder_div.firstChild && folder_div.firstChild.onthumbnailschanged) folder_div.firstChild.onthumbnailschanged(thumbnails);
+          if (index_div.firstChild && index_div.firstChild.onthumbnailschanged) index_div.firstChild.onthumbnailschanged(thumbnails);
+          if (file_div.firstChild && file_div.firstChild.onthumbnailschanged) file_div.firstChild.onthumbnailschanged(thumbnails);
+          if (action_div.firstChild && action_div.firstChild.onthumbnailschanged) action_div.firstChild.onthumbnailschanged(thumbnails);
+        });
+      }
+    })();
+  </script>
+</html>

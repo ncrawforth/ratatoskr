@@ -5,10 +5,6 @@
 export LC_ALL=POSIX
 for e in micropython python python3 python2; do
   if $(which >/dev/null "$e"); then
-    if [ "$1" = "-d" ]; then
-      ((exec "$e" "$0")&) </dev/null >/dev/null 2>/dev/null &
-      exit 0
-    fi
     exec "$e" "$0"
   fi
 done
@@ -55,6 +51,7 @@ try:
     utime_ = func("i", "utime", "sP")
     waitpid = func("i", "waitpid", "iii")
     write_ = func("i", "write", "iPi")
+    sendfile = func("i", "sendfile", "iiii")
     def listdir(path):
       for f in uos.ilistdir(path):
         if type(f[0]) == str:
@@ -99,8 +96,9 @@ os.chdir(os.path.dirname(__file__) or ".")
 
 # Load the configuration file
 f = open("config.py", "r")
-exec(f.read(), globals())
+config = f.read()
 f.close()
+exec(config, globals())
 
 
 
@@ -115,7 +113,10 @@ class Stat:
 def stat(path):
   try:
     s = os.stat(path)
-    return Stat(path, s[0] & 16384 == 16384, s[6], s[8] // 2 * 2)
+    mtime = s[8]
+    if mtime < 0:
+      mtime = mtime + 2147483648
+    return Stat(path, s[0] & 16384 == 16384, s[6], mtime // 2 * 2)
   except:
     return None
 
@@ -244,14 +245,27 @@ def send(data):
       sent = socketfd.send(data)
     except:
       raise SocketClosed()
-    if sent == 0:
+    if sent <= 0:
       raise SocketClosed()
     data = data[sent:]
+
+# Send the <count> bytes from <fd> to a socket.
+def sendfile(fd, count):
+  global socketfd
+  while count > 0:
+    yield WAIT_OUTPUT
+    try:
+      sent = os.sendfile(socketfd.fileno(), fd.fileno(), 0, min(BUF_SIZE, count))
+    except Exception as e:
+      raise SocketClosed()
+    if sent <= 0:
+      raise SocketClosed()
+    count -= sent
 
 # Receive a HTTP request and extract the method, href, query and headers.
 class Headers:
   def __getattr__(self, x):
-    return None
+    return b""
 def recvrequest():
   buffer = yield recv(BUF_SIZE)
   head, buffer = buffer.split(b"\r\n\r\n", 1)
@@ -271,23 +285,25 @@ def recvrequest():
   yield method, href, query, headers, buffer
 
 # Spawn a CGI process
+spawnedcgi = 0
 def spawncgi(cgi, method, path, query, headers, buffer):
+  global spawnedcgi
+  while spawnedcgi > 2:
+    yield WAIT_YIELD
+  spawnedcgi = spawnedcgi + 1
   p1out, p1in = os.pipe()
   p2out, p2in = os.pipe()
   pid = os.fork()
   if pid == 0:
-    if headers.CONTENT_LENGTH:
-      os.environ.setdefault("CONTENT_LENGTH", headers.CONTENT_LENGTH)
-    if headers.CONTENT_TYPE:
-      os.environ.setdefault("CONTENT_TYPE", headers.CONTENT_TYPE)
+    os.environ.setdefault("CONTENT_LENGTH", headers.CONTENT_LENGTH)
+    os.environ.setdefault("CONTENT_TYPE", headers.CONTENT_TYPE)
     os.environ.setdefault("GATEWAY_INTERFACE", b"CGI/1.1")
     os.environ.setdefault("PATH_INFO", path[len(cgi):])
     if query:
       os.environ.setdefault("QUERY_STRING", query)
     os.environ.setdefault("REQUEST_METHOD", method)
     os.environ.setdefault("SCRIPT_NAME", cgi)
-    if headers.HOST:
-      os.environ.setdefault("SERVER_NAME", headers.HOST)
+    os.environ.setdefault("SERVER_NAME", headers.HOST)
     os.environ.setdefault("SERVER_PORT", b"%d" % LISTEN_PORT)
     os.environ.setdefault("SERVER_PROTOCOL", b"HTTP/1.1")
     os.environ.setdefault("SERVER_SOFTWARE", b"Ratatoskr/0.9")
@@ -298,17 +314,19 @@ def spawncgi(cgi, method, path, query, headers, buffer):
     os.dup2(p2in, 1)
     os.close(p2out)
     if os.fork() == 0:
-      os.execl(CGI_BIN[cgi], CGI_BIN[cgi])
+      try:
+        os.execl(CGI_BIN[cgi], CGI_BIN[cgi])
+      except:
+        print("Status: 500\r\n\r")
     os._exit(0)
   os.waitpid(pid, 0)
   os.close(p1out)
   os.close(p2in)
-  fcntl.fcntl(p1in, fcntl.F_SETFL, os.O_NONBLOCK)
   fcntl.fcntl(p2out, fcntl.F_SETFL, os.O_NONBLOCK)
   try:
     requestlength = int(headers.CONTENT_LENGTH or 0)
     while requestlength > 0:
-      f.write(buffer[:requestlength])
+      os.write(p1in, buffer[:requestlength])
       requestlength -= len(buffer)
       if requestlength > 0:
         buffer = yield recv(requestlength)
@@ -339,6 +357,7 @@ def spawncgi(cgi, method, path, query, headers, buffer):
     os.close(p2out)
     if p1in:
       os.close(p1in)
+    spawnedcgi = spawnedcgi - 1
 
 # Send a HTTP response header.
 def sendresponse(status, headers = {}):
@@ -368,7 +387,9 @@ def getcontenttype(path):
            b".HTML": b"text/html", b".HTM": b"text/html",
            b".JS": b"text/javascript", b".CSS": b"text/css",
            b".TXT": b"text/plain", b".CSV": b"text/csv",
+           b".PY": b"text/plain",
            b".MD": b"text/markdown",
+           b".EML": b"message/rfc822",
            b".JPG": b"image/jpeg", b".JPEG": b"image/jpeg",
            b".PNG": b"image/png", b".SVG": b"image/svg+xml",
            b".PDF": b"application/pdf",
@@ -377,7 +398,9 @@ def getcontenttype(path):
            b".ODS": b"application/vnd.oasis.opendocument.spreadsheet",
            b".ODP": b"application/vnd.oasis.opendocument.presentation",
            b".MP3": b"audio/mpeg", b".MP4": b"video/mp4",
-           b".VCF": b"text/vcard", b".ICS": b"text/calendar"}
+           b".M3U": b"application/mpegurl",
+           b".VCF": b"text/vcard", b".ICS": b"text/calendar",
+           b".XML": b"text/xml"}
   for e in types:
     if path.upper().endswith(e):
       return types[e]
@@ -394,7 +417,7 @@ def getlastmodified(s):
 def getetag(s):
   if s == None:
     return b"0"
-  return b"%d" % hash(b"%d,%d" % (s.size, s.mtime))
+  return b"%d" % hash(b"%d,%d" % (s.mtime, s.size))
 
 # Get a WebDAV <prop> element for a file.
 class DAVType: pass
@@ -454,17 +477,21 @@ def davresponse(href, path, types):
       if DAVTYPE_ADDRESSBOOKMULTIGET in types:
         result.append(b"<CARD:address-data>")
         f = open(path, "rb")
-        result.append(f.read(BUF_SIZE))
+        result.append(f.read(BUF_SIZE).replace(b"&", b"&amp;").replace(b"<", b"&lt;"))
         f.close()
         result.append(b"</CARD:address-data>")
       if DAVTYPE_CALENDARMULTIGET in types:
         result.append(b"<CAL:calendar-data>")
         f = open(path, "rb")
-        result.append(f.read(BUF_SIZE))
+        result.append(f.read(BUF_SIZE).replace(b"&", b"&amp;").replace(b"<", b"&lt;"))
         f.close()
         result.append(b"</CAL:calendar-data>")
       result.append(b"</prop></propstat></response>")
   return b"".join(result)
+
+methods = [b"OPTIONS", b"HEAD", b"GET", b"POST", b"PUT", b"PATCH", b"APPEND",
+           b"MKCOL", b"DELETE", b"COPY", b"MOVE", b"PROPFIND", b"REPORT",
+           b"PROPPATCH", b"LOCK", b"UNLOCK"]
 
 def handle(addr):
   keepalive = True
@@ -475,17 +502,18 @@ def handle(addr):
       keepalive = headers.CONNECTION == b"keep-alive"
     
       # Redirect non-local connections to HTTPS
-      if not (addr[0] == 127 or addr[0] == 10 or \
+      if not (addr[0] == 127 or addr[0] == 10 or
               (addr[0] == 192 and addr[1] == 168) or
               (addr[0] == 172 and addr[1] >= 16 and addr[1] < 32)):
-        location = b"https://" + (headers.HOST or b"") + href
+        location = b"https://" + headers.HOST + href
         yield sendresponse(b"HTTP/1.1 301 Moved permanently",
                            {b"Location": location})
         break
 
-      # Authenticate the connection
+      # Map the path to a real file
       path = hreftopath(href)
-      if not AUTHORIZE(method, path, query, headers):
+      mapped = MAP_PATH(method, hreftopath(href), query, headers)
+      if not mapped:
         if headers.AUTHORIZATION:
           yield sendresponse(b"HTTP/1.1 403 Forbidden")
         else:
@@ -500,19 +528,17 @@ def handle(addr):
       # Spawn a CGI process if required
       cgi = None
       for k in CGI_BIN:
-        if path.startswith(k):
+        if path == k or path.startswith(k + b"/"):
           cgi = k
           break
       if cgi:
         yield spawncgi(cgi, method, path, query, headers, buffer)
         break
 
-      # Map the requested path onto the filesystem
-      path = MAP_PATH(method, path, query, headers)
-
       # Deal with the request body
+      path = mapped
       requestlength = int(headers.CONTENT_LENGTH or 0)
-      if method in [b"PUT", b"APPEND"]:
+      if method in [b"PUT", b"APPEND", b"PATCH"]:
         # For PUT and APPEND requests, put the body in a temporary file
         tmppath = path.rsplit(b"/", 1)[0] + b"/." + tmpname()
         try:
@@ -536,18 +562,18 @@ def handle(addr):
 
       s = stat(path)
       etag = getetag(s)
-      if headers.IF_MATCH and headers.IF_MATCH != etag:
+      ifmatch = headers.IF_MATCH.strip(b"\"")
+      ifnomatch = headers.IF_NONE_MATCH.strip(b"\"")
+      if ifmatch and ifmatch != etag:
         yield sendresponse(b"HTTP/1.1 412 Precondition failed")
         continue
-      if headers.PREFER and b"wait=" in headers.PREFER:
-        while (headers.IF_NONE_MATCH == etag) or \
-              (s and headers.IF_NONE_MATCH == b"*"):
+      if b"wait=" in headers.PREFER:
+        while (ifnomatch == etag) or (s and ifnomatch == b"*"):
           yield WAIT_YIELD
           if path in touched:
             s = stat(path)
             etag = getetag(s)
-      if (headers.IF_NONE_MATCH == etag) or \
-         (s and headers.IF_NONE_MATCH == b"*"):
+      if (ifnomatch == etag) or (s and ifnomatch == b"*"):
         if method in [b"GET", b"HEAD"]:
           yield sendresponse(b"HTTP/1.1 304 Not modified",
                              {b"Last-Modified": getlastmodified(s),
@@ -558,15 +584,17 @@ def handle(addr):
       if method == b"OPTIONS":
         yield sendresponse(b"HTTP/1.1 200 OK",
                            {b"DAV": b"1", 
-                            b"Allow": b"OPTIONS, HEAD, PROPFIND, GET, PUT, "\
-                                      b"MKCOL, COPY, MOVE, DELETE, APPEND"})
+                            b"Allow": b", ".join(methods)})
         continue
-      elif method in [b"HEAD", b"GET", b"PROPFIND", b"REPORT"]:
+      elif method in [b"HEAD", b"GET", b"PROPFIND", b"PROPPATCH", b"REPORT"]:
         contenttype = getcontenttype(path)
         contentencoding = None
         lastmodified = getlastmodified(s)
         separator = path.find(b"/_client/")
         if separator != -1:
+          if method not in [b"HEAD", b"GET"]:
+            yield sendresponse(b"HTTP/1.1 401 Unauthorized")
+            continue
           path = CLIENT_ROOT + path[separator + 8:]
           if stat(path + b".gz"):
             path = path + b".gz"
@@ -594,7 +622,7 @@ def handle(addr):
               continue
           start = 0
           length = s.size
-          if headers.RANGE and headers.RANGE.startswith(b"bytes="):
+          if headers.RANGE.startswith(b"bytes="):
             try:
               rangestart, rangeend = headers.RANGE[6:].split(b"-")
               rangestart = int(rangestart)
@@ -620,18 +648,21 @@ def handle(addr):
                                 b"Content-Type": contenttype,
                                 b"Content-Encoding": contentencoding,
                                 b"Last-Modified": lastmodified,
-                                b"ETag": etag})
+                                b"ETag": etag,
+                                b"Set-Cookie": headers.SET_COOKIE,
+                                b"Access-Control-Allow-Origin": headers.ACCESS_CONTROL_ALLOW_ORIGIN})
           if method == b"GET":
             f = open(path, "rb")
             try:
-              f.seek(start)
-              while length > 0:
-                sent = yield send(f.read(min(length, BUF_SIZE)))
-                length -= BUF_SIZE
+              while start > 2147483647:
+                f.seek(2147483647, 1)
+                start -= 2147483647
+              f.seek(start, 1)
+              yield sendfile(f, length)
             finally:
               f.close()
           continue
-        if method in [b"PROPFIND", b"REPORT"]:
+        if method in [b"PROPFIND", b"PROPPATCH", b"REPORT"]:
           types = {}
           types[DAVTYPE_DEFAULT] = True
           if buffer.find(b"-home-set") != -1:
@@ -657,14 +688,14 @@ def handle(addr):
                        b" xmlns:CARD=\"urn:ietf:params:xml:ns:carddav\""\
                        b" xmlns:CAL=\"urn:ietf:params:xml:ns:caldav\">"]
           outbuffersize = len(outbuffer[0])
-          if method == b"PROPFIND":
+          if method in [b"PROPFIND", b"PROPPATCH"]:
             outbuffer.append(davresponse(href, path, types))
             outbuffersize += len(outbuffer[-1])
           if s.isdir and (method == b"REPORT" or headers.DEPTH == b"1"):
             if method == b"REPORT" and buffer.find(b"-multiget") != -1:
               def getfiles(buffer):
-                for href in buffer.split(b"</href>")[:-1]:
-                  yield hreftopath(href.rsplit(b"<href>", 1)[1].rsplit(b"/", 1)[-1])
+                for href in buffer.split(b"</href")[:-1]:
+                  yield hreftopath(href.rsplit(b">", 1)[1].rsplit(b"/", 1)[-1])[1:]
               files = getfiles(buffer)
             else:
               def getfiles(path):
@@ -678,14 +709,14 @@ def handle(addr):
               outbuffer.append(davresponse(href2, path2, types))
               outbuffersize += len(outbuffer[-1])
               if outbuffersize > BUF_SIZE:
-                yield send(b"\r\n".join([b"%x" % outbuffersize,
-                                             b"".join(outbuffer), b""]))
+                outbuffer = b"\r\n".join([b"%x" % outbuffersize, b"".join(outbuffer), b""])
+                yield send(outbuffer)
                 outbuffer = []
                 outbuffersize = 0
           outbuffer.append(b"</multistatus>")
           outbuffersize += len(outbuffer[-1])
-          yield send(b"\r\n".join([b"%x" % outbuffersize, 
-                                       b"".join(outbuffer), b"0\r\n\r\n"]))
+          outbuffer = b"\r\n".join([b"%x" % outbuffersize, b"".join(outbuffer), b"0\r\n\r\n"])
+          yield send(outbuffer)
           del outbuffer
           continue
       elif method in [b"LOCK", b"UNLOCK"]:
@@ -721,11 +752,13 @@ def handle(addr):
         if s == None:
           yield sendresponse(b"HTTP/1.1 404 Not found")
           continue
-        dest = hreftopath(headers.DESTINATION, href)
-        if not AUTHORIZE(method, dest, b"", headers):
+        dest = MAP_PATH(method, hreftopath(headers.DESTINATION, hreftopath(href)), b"", headers)
+        if not dest:
           yield sendresponse(b"HTTP/1.1 403 Forbidden")
           continue
-        dest = MAP_PATH(method, dest, b"", headers)
+        if headers.OVERWRITE == b"F" and stat(dest):
+          yield sendresponse(b"HTTP/1.1 412 Precondition failed")
+          continue
         try:
           if method == b"COPY":
             try:
@@ -761,6 +794,18 @@ def handle(addr):
         continue
       elif method == b"DELETE":
         try:
+          if s.isdir:
+            empty = True
+            for file in os.listdir(path):
+              if not file.startswith(b"."):
+                empty = False
+                break
+            if not empty:
+              yield sendresponse(b"HTTP/1.1 500 Not empty")
+              continue
+            for file in os.listdir(path):
+              if file != b"." and file != b".." and file.startswith(b"."):
+                os.remove(path + b"/" + file)
           os.remove(path)
         except:
           yield sendresponse(b"HTTP/1.1 500 Not deleted")
@@ -768,9 +813,9 @@ def handle(addr):
         touch(path)
         yield sendresponse(b"HTTP/1.1 204 No content")
         continue
-      elif method in [b"PUT", b"APPEND"]:
+      elif method in [b"PUT", b"APPEND", b"PATCH"]:
         try:
-          if method == b"APPEND":
+          if method == b"APPEND" or method == b"PATCH":
             try:
               f1 = open(tmppath, "rb")
               if buffer:
@@ -799,6 +844,8 @@ def handle(addr):
                             b"ETag": getetag(s)})
         continue
       else:
+        yield sendresponse(b"HTTP/1.1 405 Not supported",
+                           {b"Allow": b", ".join(methods)})
         break
     finally:
       if tmppath:
@@ -828,7 +875,7 @@ while True:
   events = []
   touched = {}
   closed = {}
-  for fileno, event in poller.poll(1000):
+  for fileno, event in poller.poll(100):
     if fileno in waiters:
       # A client that was waiting has closed
       closed[fileno] = True
@@ -842,7 +889,7 @@ while True:
     if fileno == serverfileno:
       socketfd, addr = server.accept()
       socketfd.setblocking(False)
-      socketfd.setsockopt(6, 1, 1) # (IPPROTO_TCP, TCP_NODELAY, 1)
+      socketfd.setsockopt(6, 1, 1)
       fileno = socketfd.fileno()
       sockets[fileno] = socketfd
       if type(addr) == tuple:
